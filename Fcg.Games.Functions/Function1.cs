@@ -46,10 +46,34 @@ public class Function1
 
         if (content == null)
         {
-            var notReady = req.CreateResponse(HttpStatusCode.ServiceUnavailable);
-            notReady.Headers.Add("Content-Type", "text/plain; charset=utf-8");
-            await notReady.WriteStringAsync("No cached game yet. Wait for the timer (runs every 1 minute) to populate the cache.");
-            return notReady;
+            // First request: fetch immediately, update cache and return result
+            var client = _httpFactory.CreateClient();
+            try
+            {
+                var externalResp = await client.GetAsync(ExternalApi);
+                var bytes = await externalResp.Content.ReadAsByteArrayAsync();
+
+                lock (_cacheLock)
+                {
+                    _cachedContent = bytes;
+                    _cachedContentType = externalResp.Content.Headers.ContentType?.ToString();
+                    _cachedStatus = externalResp.StatusCode;
+                    _lastUpdated = DateTimeOffset.UtcNow;
+                }
+
+                var initialResponse = req.CreateResponse(externalResp.StatusCode);
+                if (!string.IsNullOrEmpty(_cachedContentType)) initialResponse.Headers.Add("Content-Type", _cachedContentType);
+                await initialResponse.Body.WriteAsync(bytes, 0, bytes.Length);
+                return initialResponse;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error fetching initial game from external API");
+                var notReady = req.CreateResponse(HttpStatusCode.ServiceUnavailable);
+                notReady.Headers.Add("Content-Type", "text/plain; charset=utf-8");
+                await notReady.WriteStringAsync("Unable to load initial game. Try again later.");
+                return notReady;
+            }
         }
 
         var response = req.CreateResponse(status);
